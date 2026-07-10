@@ -1,0 +1,211 @@
+# Implementation Prompt: Production RAG Zero-Hallucination System
+
+## Your role
+You are an expert software engineer and ML systems architect. Implement a production-ready, modular, deployable Python codebase for a near-zero-hallucination agentic RAG pipeline.
+
+## Source material
+Rebuild the research notebook from https://github.com/FareedKhan-dev/rag-zero-hallucinations into a proper production system. Keep the algorithmic guarantees intact, but refactor every component into services, expose a FastAPI surface, add tests, Docker, and observability.
+
+## Target stack
+- Python 3.12+
+- FastAPI + Uvicorn (async API)
+- LangGraph (CRAG agent graph)
+- LanceDB (dense vector index, on-disk, IVF_PQ)
+- bm25s (sparse lexical index)
+- vLLM-compatible / OpenAI-compatible LLM client for Qwen3-32B
+- Pydantic Settings for configuration
+- structlog + Prometheus + OpenTelemetry
+- pytest (unit + integration)
+- uv or poetry for packaging
+- Docker + docker-compose for deployment
+
+## Repository layout to create
+
+```
+rag-zero-hallucinations-prod/
+  pyproject.toml
+  .env.example
+  .gitignore
+  README.md
+  src/rag_zero/
+    __init__.py
+    config.py              # Pydantic Settings, env-driven, validates endpoints/paths
+    models/
+      domain.py            # Passage, Chunk, RetrievedChunk, CitedAnswer, FinalAnswer, AgentState, EvalItem
+      prompts.py           # All LLM prompts (router, decomposer, generator, judge, CoVe, grader)
+    clients/
+      base.py              # Abstract model client interfaces
+      llm_client.py        # OpenAI-compatible HTTP client with retries/timeouts
+      local_hf_client.py   # Local HF loaders for embedder / reranker / verifier
+      verifier_client.py  # LLM judge + optional MiniCheck / HHEM / NLI
+    ingestion/
+      loader.py            # HotpotQA / SQuAD / JSONL loaders
+      clean.py             # Unicode NFKC normalization, quality filter
+      dedup.py             # MinHash-LSH near-duplicate removal
+      chunker.py           # Sentence-aware chunking with tokenizer token budget
+      contextualizer.py    # One-line context prefix per chunk (parallel LLM calls, checkpoint/resume)
+      indexer.py           # LanceDB + bm25s index builder
+    retrieval/
+      dense.py             # LanceDB vector search, cosine distance -> similarity
+      sparse.py            # bm25s search with stemming
+      fusion.py            # Reciprocal Rank Fusion
+      rerank.py            # Qwen3 reranker over top-k candidates
+      hybrid.py            # End-to-end hybrid retriever
+    agent/
+      nodes.py             # route, retrieve, grade, refine, generate, verify, finalize
+      graph.py             # compile_langgraph() -> StateGraph with conditional edges
+      generator.py         # CitedGenerator with citation parsing + invalid-citation stripping
+      verifier.py          # ClaimExtractor + VerificationGate
+      policy.py            # AbstentionPolicy
+    serving/
+      app.py               # FastAPI factory
+      routes.py            # /health, /metrics, /query, /ingest, /evaluate
+      schemas.py           # Pydantic request/response models
+      service.py           # QueryService, IngestionService, EvaluationService
+    evaluation/
+      golden.py            # Golden set builder
+      metrics.py           # confusion matrix, coverage, hallucination rate, RAGAS metrics
+      scale_lab.py         # Synthetic vector benchmark + 100M projection
+    infra/
+      logging.py           # structlog setup
+      metrics.py           # Prometheus counters/histograms
+      tracing.py           # OpenTelemetry setup
+  scripts/                  # CLI entrypoints
+  tests/
+    unit/
+    integration/
+  deploy/
+    Dockerfile
+    docker-compose.yml
+```
+
+## Detailed requirements
+
+### 1. Configuration
+- All knobs from the original notebook: model names/endpoints, chunk_tokens, chunk_overlap, retrieve_k, rerank_top_n, rrf_k, max_hops, crag_ok, crag_bad, tau_claim, tau_abstain, seed, artifact paths.
+- Support per-environment `.env` files and environment variables.
+- Validate required endpoints/paths at startup.
+
+### 2. Model clients
+- LLMClient: chat completions with system/user prompts, temperature=0, max_tokens. Support OpenAI-compatible endpoints (vLLM). Implement retries with exponential backoff and timeouts.
+- EmbedderClient: encode texts, normalize, apply query instruction for queries.
+- RerankerClient: score (query, doc) pairs via last-token P(yes).
+- VerifierClient: LLM-as-judge returning a float in [0, 1]; optionally support MiniCheck / HHEM / NLI fallbacks.
+
+### 3. Ingestion pipeline
+- Load HotpotQA distractor validation split (or any JSONL corpus).
+- Normalize text (NFKC, collapse whitespace, drop soft hyphens).
+- Quality filter (min words).
+- MinHash-LSH deduplication (threshold=0.9, num_perm=64).
+- Sentence-aware chunking with generator tokenizer, target=256 tokens, overlap=32.
+- Contextualize each chunk with a one-line prefix via LLM; parallelize; checkpoint to pickle/JSONL so reruns resume.
+- Build LanceDB index + bm25s index; support build-or-load semantics.
+- CLI: `rag-zero ingest --source hotpotqa --output artifacts/ --slice 20000`.
+
+### 4. Retrieval
+- Dense search in LanceDB; convert cosine distance to [0, 1] similarity.
+- Sparse BM25 search.
+- Reciprocal Rank Fusion of dense and sparse rankings.
+- Rerank top-150 fused candidates down to 20.
+- Return typed `RetrievedChunk` objects.
+- Compute passage recall against gold titles.
+
+### 5. Agent graph (LangGraph)
+- Typed `AgentState` with: question, route, query, evidence, grade, draft, gate, final, hops, latencies.
+- Nodes: route, retrieve, grade, refine, generate, verify, finalize.
+- Conditional edges after grade:
+  - grade >= crag_ok (0.7)  -> generate
+  - grade < crag_bad (0.4) or hops >= max_hops -> finalize (abstain)
+  - else -> refine -> retrieve loop
+- CitedGenerator:
+  - System prompt enforces context-only answers and a citation per sentence.
+  - Emit `INSUFFICIENT_EVIDENCE` when needed.
+  - Parse citations, strip any invented chunk IDs that are not in evidence.
+- ClaimExtractor splits answer into atomic claims.
+- VerificationGate scores each claim against cited context; pass only if all claims score >= tau_claim.
+- AbstentionPolicy returns typed `FinalAnswer` with status, reason, min_support.
+- Track per-stage latencies.
+
+### 6. Serving API
+- `POST /query` accepts `{ "question": "..." }` and returns:
+  ```json
+  {
+    "status": "answered",
+    "answer": "...",
+    "citations": ["chunk_id_1"],
+    "min_support": 1.0,
+    "reason": "verified",
+    "latencies": {...},
+    "hops": 0
+  }
+  ```
+- `POST /ingest` kicks off ingestion and returns a job id.
+- `GET /jobs/{id}` returns status/progress.
+- `POST /evaluate` runs the golden set and returns metrics.
+- `GET /health` and `GET /metrics` exposed.
+- Endpoints are async; services are dependency-injected.
+
+### 7. Evaluation
+- Build golden set: 100 answerable (HotpotQA) + 100 unanswerable (SQuAD v2 impossible + false-premise hand-written questions).
+- Compute:
+  - confusion_2x2 (answerable/unanswerable x answered/abstained)
+  - hallucination_rate = answered unanswerable / total unanswerable
+  - coverage = answered answerable / total answerable
+  - faithfulness, answer_relevancy, context_recall@k (RAGAS)
+  - risk-coverage curve and tau* selection
+  - verifier AUROC on HaluBench (optional if data available)
+- Scale lab: build IVF_PQ LanceDB indexes at 100k, 1M, 10M synthetic 1024-dim vectors; measure build time, disk, p50/p95 latency, recall@10; project to 100M.
+
+### 8. Observability
+- Structured JSON logs via structlog.
+- Prometheus metrics: `rag_zero_query_total`, `rag_zero_stage_latency_seconds`, `rag_zero_abstention_total`, `rag_zero_hallucination_total`.
+- OpenTelemetry traces across LangGraph nodes.
+
+### 9. Testing
+- Unit tests: normalization, chunking, RRF, citation parser, abstention policy.
+- Integration tests with a small smoke corpus and mocked or tiny model.
+- Golden-set regression test over 20 questions asserting hallucination_rate <= 5%.
+- Scale lab smoke test that builds a 10k-vector index without OOM.
+
+### 10. Deployment
+- Multi-stage Dockerfile.
+- docker-compose.yml with services: `vllm` (Qwen3-32B), `app` (FastAPI), optional `redis`.
+- Health/readiness probes.
+- `.env.example`.
+
+## Step-by-step implementation order
+1. Bootstrap repo structure, pyproject.toml, linting, basic config.
+2. Domain models + model clients.
+3. Ingestion pipeline (normalize, dedup, chunk, contextualize, index).
+4. Retrieval stack (dense + sparse + RRF + reranker).
+5. Agent graph nodes + LangGraph wiring.
+6. FastAPI serving layer.
+7. Evaluation harness + scale lab.
+8. Observability + tests.
+9. Docker + final integration verification.
+
+## Acceptance criteria
+1. `pytest` passes (unit + integration).
+2. `docker-compose up` boots vLLM + app; `/health` returns 200.
+3. `POST /query` with the running example returns the same verified answer as the original notebook.
+4. False-premise questions return `status: "abstained"`.
+5. Golden set reproduces headline metrics within tolerance:
+   - hallucination on unanswerable <= 5%
+   - context recall >= 0.90
+   - faithfulness >= 0.85
+6. `rag-zero ingest` runs idempotently and produces LanceDB + bm25s artifacts.
+7. Scale lab runs without OOM and reports 10M vector p95 latency.
+8. No secrets in code; everything env-driven.
+9. Code passes `ruff check` and `mypy`.
+
+## Constraints
+- Keep model calls local-first via vLLM-compatible endpoints. External APIs must be opt-in.
+- Preserve the citation + claim verification + abstention guarantees from the original notebook.
+- Type-hint everything.
+- No notebook-style globals; all dependencies must be injectable.
+- Do exactly what was requested. Do not add features not listed above.
+- After each phase, run tests. Fix failures before moving to the next phase.
+- Commit working code frequently with clear messages.
+
+## How to report progress
+At the end of every phase, print a short progress summary: which files were created/modified, which tests pass, and any blockers. If you are blocked, stop and ask for direction.

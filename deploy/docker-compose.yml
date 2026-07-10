@@ -1,0 +1,96 @@
+version: "3.8"
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: rag-zero-vllm
+    command: >
+      --model Qwen/Qwen3-32B
+      --served-model-name Qwen3-32B
+      --tensor-parallel-size 1
+      --dtype auto
+      --max-model-len 32768
+      --trust-remote-code
+      --port 8000
+    # NOTE: Qwen3-32B at bf16 needs ~64 GB VRAM. For production hardware with
+    # less memory, add --quantization awq or refer to a GPTQ/AWQ variant and
+    # increase --tensor-parallel-size across multiple GPUs.
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: 16g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+    networks:
+      - rag-zero
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: rag-zero-app
+    ports:
+      - "8000:8000"
+      - "9090:9090"
+    env_file:
+      - ../.env
+    environment:
+      - RAG_LLM_BASE_URL=http://vllm:8000/v1
+      - RAG_EMBEDDER_BASE_URL=http://vllm:8000/v1
+      - RAG_RERANKER_BASE_URL=http://vllm:8000/v1
+      - RAG_HOST=0.0.0.0
+      - RAG_PORT=8000
+      - RAG_WORKERS=1
+      - RAG_LANCEDB_URI=/app/artifacts/lancedb
+      - RAG_BM25_PATH=/app/artifacts/bm25s
+      - RAG_CHECKPOINT_DIR=/app/checkpoints
+    volumes:
+      - artifacts:/app/artifacts
+      - checkpoints:/app/checkpoints
+    depends_on:
+      vllm:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - rag-zero
+
+  redis:
+    image: redis:7-alpine
+    container_name: rag-zero-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - rag-zero
+
+volumes:
+  artifacts:
+  checkpoints:
+
+networks:
+  rag-zero:
+    driver: bridge

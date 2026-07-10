@@ -1,0 +1,160 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rag-zero"
+version = "0.1.0"
+description = "Production-grade near-zero-hallucination agentic RAG pipeline"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [
+    { name = "Engineering Team" },
+]
+keywords = ["rag", "llm", "langgraph", "retrieval", "verification"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+dependencies = [
+    # Web serving
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "pydantic>=2.11.0",
+    "pydantic-settings>=2.8.0",
+
+    # Agent graph
+    "langgraph>=0.4.0",
+    "langchain-core>=0.3.0",
+
+    # Vector + lexical search
+    "lancedb>=0.21.0",
+    "bm25s>=0.2.0",
+    "PyStemmer>=2.0.0",
+
+    # ML / local models
+    "torch>=2.6.0",
+    "transformers>=4.51.0",
+    "sentence-transformers>=4.1.0",
+    "huggingface-hub[hf_xet]>=0.30.0",
+    "safetensors>=0.5.3",
+
+    # Data + NLP
+    "datasets>=3.8.0",
+    "nltk>=3.9.1",
+    "scikit-learn>=1.6.1",
+    "scipy>=1.15.0",
+    "numpy>=2.2.0",
+    "pyarrow>=19.0.0",
+
+    # Dedup
+    "datasketch>=1.6.5",
+
+    # Observability
+    "prometheus-client>=0.21.0",
+    "opentelemetry-api>=1.32.0",
+    "opentelemetry-sdk>=1.32.0",
+    "opentelemetry-exporter-otlp>=1.32.0",
+    "opentelemetry-instrumentation-fastapi>=0.53b0",
+    "structlog>=25.3.0",
+    "asgi-correlation-id>=4.3.4",
+
+    # HTTP client
+    "httpx[http2]>=0.28.0",
+    "tenacity>=9.0.0",
+
+    # Misc
+    "orjson>=3.10.0",
+    "python-dotenv>=1.1.0",
+    "typer>=0.16.0",
+    "rich>=14.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.0",
+    "pytest-asyncio>=0.26.0",
+    "pytest-cov>=6.1.1",
+    "ruff>=0.11.0",
+    "mypy>=1.15.0",
+    "types-requests>=2.32.0",
+]
+mem0 = [
+    "mem0ai>=0.1.0",
+]
+
+[project.scripts]
+rag-zero = "rag_zero.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag_zero"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "N",
+    "W",
+    "UP",
+    "B",
+    "C4",
+    "SIM",
+    "TCH",
+    "TID",
+    "TRY",
+    "RUF",
+]
+ignore = ["E501", "TRY003", "EM101", "EM102", "B008"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+show_error_codes = true
+exclude = ["tests/"]
+
+[[tool.mypy.overrides]]
+module = [
+    "lancedb.*",
+    "bm25s.*",
+    "Stemmer.*",
+    "datasketch.*",
+    "datasets.*",
+    "prometheus_client.*",
+    "opentelemetry.*",
+    "sklearn.*",
+    "transformers.*",
+    "sentence_transformers.*",
+    "torch.*",
+    "nltk.*",
+    "mem0.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration",
+]
