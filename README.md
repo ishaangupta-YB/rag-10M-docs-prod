@@ -1,9 +1,7 @@
 # RAG Zero (Production)
 
-Production-grade, near-zero-hallucination agentic RAG pipeline.
-
-Built from the research notebook [rag-zero-hallucinations](https://github.com/FareedKhan-dev/rag-zero-hallucinations) and refactored into modular services.
-
+Production-grade, near-zero-hallucination agentic RAG pipeline. Saw a lot of sloppy articles on this title, so thought why not write something that really works instead of clickbait slop
+ 
 ## Quick start
 
 ```bash
